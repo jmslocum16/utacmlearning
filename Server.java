@@ -1,6 +1,8 @@
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -35,14 +37,14 @@ public class Server {
 	
   public static void main(String[] args) throws Exception {
 		if (args.length != 2) {
-			System.out.println("need 2 args, dropbox app key and dropbox app secret");
+			System.err.println("need 2 args, dropbox app key and dropbox app secret");
 			return;
 		}
 		// init dropbox client
 		try {
 			initDbxClient(args[0], args[1]);
 		} catch (Exception e) {
-			System.out.println("Exception initializing dropbox stuff: " + e.toString());
+			System.err.println("Exception initializing dropbox stuff: " + e.toString());
 			return;
 		}
 
@@ -55,6 +57,8 @@ public class Server {
 		server.createContext("/newproblem", new CreateProblemHandler());
 		server.createContext("/problem", new ViewProblemHandler());
 		server.createContext("/overview", new ViewOverviewHandler());
+		server.createContext("/input", new ViewProblemHandler());
+		server.createContext("/output", new ViewProblemHandler());
 		server.setExecutor(null); // creates a default executor
 		server.start();
 	}
@@ -84,28 +88,103 @@ public class Server {
 
 	static class DefaultHandler implements HttpHandler {
 		public void handle(HttpExchange t) throws IOException {
-			String response = "<div>Why can't I hold all these problems??!?</div>";
-			t.sendResponseHeaders(200, response.length());
+			int responseCode = 200;
+			StringBuilder response = new StringBuilder();
+			StringBuilder top = new StringBuilder();
+			StringBuilder bottom = new StringBuilder();
+			BufferedReader topReader, bottomReader;
+			try {
+				topReader = new BufferedReader(new FileReader(new File("main-top.html")));
+				bottomReader = new BufferedReader(new FileReader(new File("main-bottom.html")));
+				while (topReader.ready()) {
+					top.append(topReader.readLine().trim());
+				}
+				while (bottomReader.ready()) {
+					bottom.append(bottomReader.readLine().trim());
+				}
+			} catch (IOException e) {
+				System.err.println("Error serving main html files.");
+				responseCode = 500;
+				response.append("Error serving main html files.");
+			}
+			String fileTreeHtml = null;
+			if (responseCode == 200) {
+				// still ok, make file tree html
+				fileTreeHtml = serveMainTree();
+				if (fileTreeHtml == null) {
+					System.err.println("Error serving main file tree.");
+					responseCode =  500;
+					response.append("Error serving main file tree.");
+				}	
+			}
+			if (responseCode == 200) {
+				//response.append("<section>");
+				response.append(top.toString());
+				//response.append("</section><section>");
+				response.append(fileTreeHtml);
+				//response.append("</section><section>");
+				response.append(bottom.toString());
+				//response.append("</section>");
+			}
+			t.sendResponseHeaders(responseCode, response.toString().length());
 			OutputStream os = t.getResponseBody();
-			os.write(response.getBytes());
+			os.write(response.toString().getBytes());
 			os.close();
 		}
 	}
 
 	private static class Node {
 		String name;
-		List<Node> children;
-		Node(String name) {
+		int id;
+		List<Node> children = null;
+		String html = null;
+		Node(String name, int id) {
 			this.name = name;
+			this.id = id;
 		}
 		void addChild(Node node) {
 			if (children == null) {
 				children = new ArrayList<Node>();
 			}
 			children.add(node);
+			// invalidate html
+			html = null;
 		}
 		boolean isLeaf() {
 			return children == null;
+		}
+		// TODO make this expandable tree
+		String getHtml(int indent) {
+			if (html == null) {
+				String indentStr = getIndent(indent);
+				StringBuilder response = new StringBuilder();
+				if (isLeaf()) {
+					// link to problem
+					response.append("<div>"+indentStr+"<a href=problem?"+id+">Problem: "+name+"</a></div>");
+				} else {
+					response.append("<div><div>"+indentStr+name+"</div>");
+					if (overviewDirs.containsKey(id)) {
+						response.append("<div>"+indentStr+"<a href=overview?"+id+">"+name+" overview</a></div>");
+					}
+					for (Node n : children) {
+						String childHtml = n.getHtml(indent+1);
+						if (childHtml == null) {
+							return null;
+						}
+						response.append(childHtml);
+					}
+					response.append("</div>");
+				}
+				html = response.toString();
+			}
+			return html;
+		}
+		private String getIndent(int indent) {
+			StringBuilder ret = new StringBuilder();
+			for (int i = 0; i < 4 * indent; i++) {
+				ret.append("&nbsp;");
+			}
+			return ret.toString();
 		}
 	}
 
@@ -114,7 +193,7 @@ public class Server {
 		problemDirs.clear();
 		Node newRoot = computeNode("/");
 		if (newRoot == null) {
-			System.out.println("image load failed");
+			System.err.println("image load failed");
 			return false;
 		}
 		lock.writeLock().lock();
@@ -152,7 +231,7 @@ public class Server {
 			}
 			String name = br.readLine().trim();
 			int id = Integer.parseInt(br.readLine().trim());
-			Node node = new Node(name);
+			Node node = new Node(name, id);
 			if (isValidProblem(listing)) {
 				// do file stuff
 				problemDirs.put(id, path);
@@ -182,10 +261,26 @@ public class Server {
 			}
 			return node;
 		} catch (Exception e) {
-			System.out.println("exception computing node path " + path);
+			System.err.println("exception computing node path " + path);
 			e.printStackTrace();
 			return null;
 		}
+	}
+	
+	/**
+	 * Serves main file tree html, returns null if error.
+	 */
+	private static String serveMainTree() {
+		if (root == null || root.children == null) return null;
+		StringBuilder response = new StringBuilder();
+		for (Node n : root.children) {
+			String childHtml = n.getHtml(0);
+			if (childHtml == null) {
+				return null;
+			}
+			response.append(childHtml);
+		}
+		return response.toString();
 	}
 
 	private static boolean isValidProblem(DbxEntry.WithChildren listing) {	
@@ -212,10 +307,10 @@ public class Server {
 			out = new ByteArrayOutputStream();
 			dbxClient.getFile(path, null, out);
 		} catch (DbxException e) {
-			System.out.println("Exception reading " + path + "from dropbox: " + e.toString());
+			System.err.println("Exception reading " + path + "from dropbox: " + e.toString());
 			throw e;
 		} catch (IOException e) {
-			System.out.println("Exception reading " + path + "from dropbox: " + e.toString());
+			System.err.println("Exception reading " + path + "from dropbox: " + e.toString());
 			throw e;
 		} finally {
 			if (out != null) {
@@ -294,7 +389,8 @@ public class Server {
 				problemNum = Integer.parseInt(query);
 			} catch (NumberFormatException e) {}
 			if (problemNum >= 0 && problemDirs.containsKey(problemNum)) {
-				response = serveProblem(problemNum);
+				String path = problemDirs.get(problemNum) + "/description.txt";
+				response = serveFile(path, true);
 			} else {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
@@ -304,25 +400,6 @@ public class Server {
 			os.write(response.getBytes());
 			os.close();
 		}
-	}
-
-	private static String serveProblem(int problemNumber) {
-		String path = problemDirs.get(problemNumber) + "/description.txt";
-		StringBuilder response = new StringBuilder();
-		try {
-			BufferedReader br = readFileFromDbx(path);
-			while (br.ready()) {
-				String line = br.readLine();
-				if (line == null) break;
-				response.append(line.trim());
-			}
-		} catch (Exception e) {
-			System.err.println("dropbox exception reading from " + path);
-			e.printStackTrace();
-			response = new StringBuilder();
-			response.append("error reading problem file.");
-		}
-		return response.toString();
 	}
 
 	static class ViewOverviewHandler implements HttpHandler {
@@ -338,7 +415,8 @@ public class Server {
 				responseCode = 404;
 			}
 			if (overviewNum >= 0 && overviewDirs.containsKey(overviewNum)) {
-				response = serveOverview(overviewNum);
+				String path = overviewDirs.get(overviewNum) + "/overview.txt";
+				response = serveFile(path, true);
 			} else {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
@@ -350,19 +428,48 @@ public class Server {
 		}
 	}
 	
-	private static String serveOverview(int overviewNumber) {	
-		String path = overviewDirs.get(overviewNumber) + "/overview.txt";
-		StringBuilder response = new StringBuilder();
-		try {
-			BufferedReader br = readFileFromDbx(path);
-			while (br.ready()) {
-				response.append(br.readLine().trim());
+	static class ViewInputHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+			String query = t.getRequestURI().getQuery();
+			int inputNum = -1;
+ 			int responseCode = 200;
+			String response = null;
+			try {
+				inputNum = Integer.parseInt(query);
+			} catch (NumberFormatException e) {
+				response = query + " is not a valid problem number.";
+				responseCode = 404;
 			}
-		} catch (Exception e) {
-			System.err.println("dropbox exception reading from " + path);
-			response = new StringBuilder();
-			response.append("error reading file.");
+			if (inputNum >= 0 && problemDirs.containsKey(inputNum)) {
+				String path = problemDirs.get(inputNum) + "/input.txt";
+				// TODO make this actually download a file, and not make them have to c/p the input into a test file.
+				response = serveFile(path, true);
+			} else {
+				response = query + " is not a valid problem number.";
+        responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.length());
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
 		}
-		return response.toString();
+	}
+	private static String serveFile(String path, boolean keepNL) {
+    StringBuilder response = new StringBuilder();
+    try {
+      BufferedReader br = readFileFromDbx(path);
+      while (br.ready()) {
+				String line = br.readLine();
+				if (line == null) break;
+        response.append(line.trim());
+				if (keepNL) response.append("\n");
+      }
+    } catch (Exception e) {
+      System.err.println("dropbox exception reading from " + path);
+			e.printStackTrace();
+      response = new StringBuilder();
+      response.append("error reading file.");
+    }
+    return response.toString().trim();
 	}
 }
