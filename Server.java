@@ -9,6 +9,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.StringReader;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.util.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -32,6 +33,9 @@ public class Server {
 	// image
 	private static Map<Integer, String> overviewDirs = new HashMap<Integer, String>();
 	private static Map<Integer, String> problemDirs = new HashMap<Integer, String>();
+	private static Set<String> problemNames = new HashSet<String>();
+	private static int nextProblemNumber = 0;
+	private static int nextFolderNumber = 0;
 	
 	private static Node root = null;
 	
@@ -57,7 +61,7 @@ public class Server {
 		server.createContext("/newproblem", new CreateProblemHandler());
 		server.createContext("/problem", new ViewProblemHandler());
 		server.createContext("/overview", new ViewOverviewHandler());
-		server.createContext("/input", new ViewProblemHandler());
+		server.createContext("/input", new ViewInputHandler());
 		server.createContext("/output", new ViewProblemHandler());
 		server.setExecutor(null); // creates a default executor
 		server.start();
@@ -126,7 +130,7 @@ public class Server {
 				response.append(bottom.toString());
 				//response.append("</section>");
 			}
-			t.sendResponseHeaders(responseCode, response.toString().length());
+			t.sendResponseHeaders(responseCode, response.toString().getBytes().length);
 			OutputStream os = t.getResponseBody();
 			os.write(response.toString().getBytes());
 			os.close();
@@ -188,9 +192,19 @@ public class Server {
 		}
 	}
 
+	static class RefreshWorker implements Runnable {
+		@Override
+		public void run() {
+			refreshImage();
+		}
+	}
+
 	private static boolean refreshImage() {
 		overviewDirs.clear();
 		problemDirs.clear();
+		problemNames.clear();
+		nextProblemNumber = 0;
+		nextFolderNumber = 0;
 		Node newRoot = computeNode("/");
 		if (newRoot == null) {
 			System.err.println("image load failed");
@@ -235,9 +249,12 @@ public class Server {
 			if (isValidProblem(listing)) {
 				// do file stuff
 				problemDirs.put(id, path);
+				problemNames.add(name);
+				nextProblemNumber = Math.max(nextProblemNumber, id + 1);
 				System.out.println("added problem " + name);
 			} else {
 				// folder
+				nextFolderNumber = Math.max(nextFolderNumber, id + 1);
 				// see if has overview
 				boolean isOverview = containsFile(listing, "overview.txt");
 				if (isOverview) {
@@ -288,6 +305,8 @@ public class Server {
 		if (!containsFile(listing, "solved.txt")) return false;
 		if (!containsFile(listing, "input.txt")) return false;
 		if (!containsFile(listing, "output.txt")) return false;
+		// added editorial
+		if (!containsFile(listing, "editorial.txt")) return false;
 		return true;
 	}
 
@@ -353,34 +372,158 @@ public class Server {
 	static class CreateProblemHandler implements HttpHandler {
 		public void handle(HttpExchange t) throws IOException {
 			String requestMethod = t.getRequestMethod();
+			String response = null;
+			int responseCode = 200;
 			if ("GET".equals(requestMethod)) {
-				handleCreateProblemGET(t);
-			} else if ("POST".equals(requestMethod)) {
-				handleCreateProblemPOST(t);
-			} else {
-				String response = "n00pe";
-				t.sendResponseHeaders(404, response.length());
-				OutputStream os = t.getResponseBody();
-				os.write(response.getBytes());
-				os.close();
+				response = handleCreateProblem(t);
 			}
+			if (response == null) {
+				response = "Error serving request";
+				responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
 		}
 	}
 
-	static void handleCreateProblemGET(HttpExchange t) throws IOException {
-		String response = "<div>so you wanna make a problem eh?</div>";
-		t.sendResponseHeaders(200, response.length());
-		OutputStream os = t.getResponseBody();
-		os.write(response.getBytes());
-		os.close();
+	static String handleCreateProblem(HttpExchange t) {
+		if (t.getRequestURI().getQuery() == null) {
+			StringBuilder response = new StringBuilder();
+			BufferedReader br;
+			try {
+				br = new BufferedReader(new FileReader(new File("create-problem.html")));
+				while (br.ready()) {
+					response.append(br.readLine());
+				}
+			} catch (IOException e) {
+				return null;
+			}
+			return response.toString();
+		}
+
+		String[] paramsString = t.getRequestURI().getQuery().split("&");  
+    Map<String, String> params = new HashMap<String, String>();  
+    for (String p : paramsString) {
+				int index = p.indexOf("=");
+				String key = p.substring(0, index);
+				String val = p.substring(index + 1);
+				try {
+					 val = URLDecoder.decode(val, charset);
+				} catch (IOException e) {}
+        params.put(key, val);  
+    }
+		for (String value: params.keySet()) {
+			if (params.get(value).length() == 0) {
+				return "cannot have empty " + value;
+			}
+		}
+			System.out.println("got create problem!!!!!");
+		// do things with it
+		try {
+			createProblem(params);
+		} catch (DbxException e) {
+			System.err.println(e);
+			return null;
+		} catch (IOException e) {
+			System.err.println(e);
+			return null;
+		} catch (IllegalArgumentException e) {
+			e.printStackTrace();
+			return e.getMessage();
+		} catch (Exception e) {
+			e.printStackTrace();
+			return null;
+		}
+		System.out.println("Finished Creating problem");
+		return "Success!`";
 	}
 
-	static void handleCreateProblemPOST(HttpExchange t) throws IOException {
-		// TODO
+	static void createProblem(Map<String, String> params) throws IOException, DbxException {
+		// make file text from post request
+		
+		String name = params.get("name");
+		if (problemNames.contains(name)) {
+			throw new IllegalArgumentException("problem named " + name + " already exists!");
+		}
+		String path = params.get("path");
+		System.out.println("creating problem " + name + " at " + path);
+		StringBuilder description = new StringBuilder();
+		description.append("<p>");
+		description.append(params.get("desc"));
+		description.append("</p><p>Input:<br>");
+		description.append(params.get("inputdesc"));
+		description.append("</p><p>Output:<br>");
+		description.append(params.get("outputdesc"));
+		description.append("</p><p>Input Constraints:<br><pre>");
+		description.append(params.get("constraints"));
+		description.append("</pre></p><p>Sample Input:<br><pre>");
+		description.append(params.get("sampleinput"));
+		description.append("</pre></p><p>Sample output:<br><pre>");
+		description.append(params.get("sampleoutput"));
+		description.append("</pre></p>");
+
+		String input = params.get("judgeinput");
+		String output = params.get("judgeoutput");
+		String editorial = params.get("editorial");
+
+
+		// actually make files on dropbox	
+		String fullPath = path + "/" + name;
+	
+		// create folder
+		if (!isValidDBPath(path)) {
+			createFolderAndInfo(path);
+		}
+		dbxClient.createFolder(fullPath);
+
+		fullPath += "/";
+		
+		// make info file
+		int id = nextProblemNumber++;
+		String info = name + "\n" + id;
+		writeFileToDropbox(info, fullPath + "info.txt");
+		
+		// write other files
+		writeFileToDropbox(description.toString(), fullPath + "description.txt");
+		writeFileToDropbox(editorial, fullPath + "editorial.txt");
+		writeFileToDropbox(input, fullPath + "input.txt");
+		writeFileToDropbox(output, fullPath + "output.txt");
+		writeFileToDropbox("", fullPath + "solved.txt");
+
+		// add it to the current image asynchronously
+		//refreshImage();
+		Thread t = new Thread(new RefreshWorker());
+		t.start();
+	}
+
+	static boolean isValidDBPath(String path) {
+		DbxEntry res = null;
+		try {
+			res = dbxClient.getMetadata(path);
+		} catch (DbxException e) {
+			return false;
+		}
+		return res != null;
+	}
+	
+	static void createFolderAndInfo(String path) throws IOException, DbxException {
+		String[] pathParts = path.split("/");
+		StringBuilder curPath = new StringBuilder();
+		for (int i = 0; i < pathParts.length; i++) {
+			curPath.append("/");
+			curPath.append(pathParts[i]);
+			if (isValidDBPath(curPath.toString())) continue;
+			dbxClient.createFolder(curPath.toString());
+			String info = pathParts[i] + "\n" + nextFolderNumber++;
+			writeFileToDropbox(info, curPath.toString() + "/info.txt");
+		}
 	}
 
 	static class ViewProblemHandler implements HttpHandler {
 		public void handle(HttpExchange t) throws IOException {
+			// apparently java 7 is not backwards compatible with this, should just use t.getQueryString() if ever need to upgrade.
 			String query = t.getRequestURI().getQuery();
 			int problemNum = -1;
  			int responseCode = 200;
@@ -389,19 +532,26 @@ public class Server {
 				problemNum = Integer.parseInt(query);
 			} catch (NumberFormatException e) {}
 			if (problemNum >= 0 && problemDirs.containsKey(problemNum)) {
+				response = getProblemHeader(problemNum);
 				String path = problemDirs.get(problemNum) + "/description.txt";
-				response = serveFile(path, true);
+				response += serveFile(path, true);
 			} else {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
 			}
-			t.sendResponseHeaders(responseCode, response.length());
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
 			OutputStream os = t.getResponseBody();
 			os.write(response.getBytes());
 			os.close();
 		}
 	}
 
+	private static String getProblemHeader(int problemNum) {
+		StringBuilder header = new StringBuilder();
+		header.append("<div><input type=\"button\" onclick=\"window.open(\\\"/input?" + problemNum +"\\\");\">Download Input</input><div>");
+		return header.toString();
+	}
+	
 	static class ViewOverviewHandler implements HttpHandler {
 		public void handle(HttpExchange t) throws IOException {
 			String query = t.getRequestURI().getQuery();
@@ -421,7 +571,7 @@ public class Server {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
 			}
-			t.sendResponseHeaders(responseCode, response.length());
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
 			OutputStream os = t.getResponseBody();
 			os.write(response.getBytes());
 			os.close();
@@ -442,27 +592,37 @@ public class Server {
 			}
 			if (inputNum >= 0 && problemDirs.containsKey(inputNum)) {
 				String path = problemDirs.get(inputNum) + "/input.txt";
+				response = getFormattedInput(serveFile(path, true));
 				// TODO make this actually download a file, and not make them have to c/p the input into a test file.
-				response = serveFile(path, true);
 			} else {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
 			}
-			t.sendResponseHeaders(responseCode, response.length());
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
 			OutputStream os = t.getResponseBody();
 			os.write(response.getBytes());
 			os.close();
 		}
 	}
-	private static String serveFile(String path, boolean keepNL) {
+
+	private static String getFormattedInput(String inputData) {
+		StringBuilder response = new StringBuilder();
+		response.append("<p>This is the input to the problem. You can copy-paste it into your program's standard input or into a test file from here.</p><div>Input:</div><span><pre style=\"background-color:#CCCCCC\">");
+		response.append(inputData);
+		response.append("</pre></span>");
+		return response.toString();
+	}
+
+	private static String serveFile(String path, boolean keepWS) {
     StringBuilder response = new StringBuilder();
     try {
       BufferedReader br = readFileFromDbx(path);
       while (br.ready()) {
 				String line = br.readLine();
 				if (line == null) break;
-        response.append(line.trim());
-				if (keepNL) response.append("\n");
+				if (!keepWS) line = line.trim();
+        response.append(line);
+				if (keepWS) response.append("\n");
       }
     } catch (Exception e) {
       System.err.println("dropbox exception reading from " + path);
