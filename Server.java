@@ -63,6 +63,8 @@ public class Server {
 		server.createContext("/overview", new ViewOverviewHandler());
 		server.createContext("/input", new ViewInputHandler());
 		server.createContext("/output", new OutputHandler());
+		server.createContext("/editorial", new EditorialHandler());
+		server.createContext("/samplesols", new SampleSolHandler());
 		server.setExecutor(null); // creates a default executor
 		server.start();
 	}
@@ -537,9 +539,13 @@ public class Server {
 				problemNum = Integer.parseInt(query);
 			} catch (NumberFormatException e) {}
 			if (problemNum >= 0 && problemDirs.containsKey(problemNum)) {
-				response = getProblemHeader(problemNum);
-				String path = problemDirs.get(problemNum) + "/description.txt";
-				response += serveFile(path, true);
+				if (false /*problem already solved*/) {
+					response = handleProblemAlreadySolved(problemNum);
+				} else {
+					response = getProblemHeader(problemNum);
+					String path = problemDirs.get(problemNum) + "/description.txt";
+					response += serveFile(path, true);
+				}
 			} else {
 				response = query + " is not a valid problem number.";
         responseCode = 404;
@@ -720,7 +726,7 @@ public class Server {
 			try {
 				outputNum = Integer.parseInt(query);
 			} catch (NumberFormatException e) {
-				response = query + " is not a valid problem number.";
+			// TODO handleSolved();
 				responseCode = 404;
 			}
 			if (outputNum >= 0 && problemDirs.containsKey(outputNum)) {
@@ -776,13 +782,13 @@ public class Server {
 				return "You didn't submit anything.";
 			}
 			String path = problemDirs.get(problemNumber) + "/output.txt";
-			return getFormattedOutput(serveFile(path, true), programOutput);
+			return getFormattedOutput(serveFile(path, true), programOutput, problemNumber);
 		} else {
 			return "Error reading output.";
 		}
 	}	
 	
-	private static String getFormattedOutput(String expected, String given) {
+	private static String getFormattedOutput(String expected, String given, int problemNumber) {
 		System.out.println("given output: ");
 		System.out.println(given);
 		// TODO header or anything?
@@ -809,8 +815,9 @@ public class Server {
 			}
 		}
 		if (same) {
-			return "<div style=\"background-color:green\"><p>Correct submission! Your output matched the expected output!</p></div>";
-			// TODO handleSolved();
+			//return "<div style=\"background-color:green\"><p>Correct submission! Your output matched the expected output!</p></div>";
+			// TODO handleSuccess(); (tl;dr put name in solved file)
+			return handleProblemAlreadySolved(problemNumber);
 		} else {
 			StringBuilder response = new StringBuilder();
 			response.append("<h1>Incorrect response.</h1>");
@@ -838,4 +845,84 @@ public class Server {
 			return response.toString();
 		}
 	}
+
+	private static String handleProblemAlreadySolved(int problemNumber) {
+		String file = serveLocalFile("submit-success.html", false);
+		file = file.replaceAll("<problemnumber>", ""+problemNumber);
+		return file;
+	}
+
+	static class EditorialHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+ 			int responseCode = 200;
+			String response = null;
+			String query = t.getRequestURI().getQuery();
+
+			int outputNum = -1;
+			try {
+				outputNum = Integer.parseInt(query);
+			} catch (NumberFormatException e) {
+				responseCode = 404;
+			}
+			if (outputNum >= 0 && problemDirs.containsKey(outputNum)) {
+				String path = problemDirs.get(outputNum) + "/editorial.txt";
+				response = serveFile(path, true);
+			} else {
+				response = query + " is not a valid problem number.";
+        responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
+		}
+	}
+
+	static class SampleSolHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+ 			int responseCode = 200;
+			String response = null;
+			String query = t.getRequestURI().getQuery();
+			int outputNum = -1;
+			try {
+				outputNum = Integer.parseInt(query);
+			} catch (NumberFormatException e) {
+				responseCode = 404;
+			}
+			if (outputNum >= 0 && problemDirs.containsKey(outputNum)) {
+				try {
+					String path = problemDirs.get(outputNum) + "/samplesols";
+					DbxEntry.WithChildren solsDir = dbxClient.getMetadataWithChildren(path);
+					if (solsDir == null || solsDir.children == null || solsDir.children.size() == 0) {
+						response = "No sample solutions for this problem :(";
+						System.out.println("no sample sols for " + outputNum);
+					} else {
+						List<DbxEntry> children = solsDir.children;
+						StringBuilder page = new StringBuilder();
+						page.append("<div>Sample solutions: ");
+						page.append("<div style=\"background-color:grey;height:20px;\"></div>");
+						for (DbxEntry e: children) {
+							page.append("<div><pre>");
+							page.append(serveFile(e.path, true));
+							page.append("</pre></div><br>");
+							page.append("<div style=\"background-color:grey;height:20px;\"></div>");
+						}
+						page.append("</div>");
+						System.out.println("Served " + children.size() + " sample solutions for " + outputNum);
+						response = page.toString();
+					}
+				} catch (DbxException e) {
+					response = "Error loading sample solutions :(";
+				}
+			} else {
+				response = query + " is not a valid problem number.";
+        responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
+		}
+	}
+
 }
