@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Submit your answer</title>
+</head>
+<body>
+
+<form action="/output?<problemnumber>" method="post" enctype="multipart/form-data">
+	Copy your output here:<br>
+	<textarea rows=15 cols=60 name="outtext"></textarea><br><br><br>
+	Or upload a file:
+	<br><input type="file" name="outfile" size="30"<br>
+  <br><br><br><input type="submit" value="Submit">
+</form>
+</body>
+</html>
+

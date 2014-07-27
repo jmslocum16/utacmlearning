@@ -62,7 +62,7 @@ public class Server {
 		server.createContext("/problem", new ViewProblemHandler());
 		server.createContext("/overview", new ViewOverviewHandler());
 		server.createContext("/input", new ViewInputHandler());
-		server.createContext("/output", new ViewProblemHandler());
+		server.createContext("/output", new OutputHandler());
 		server.setExecutor(null); // creates a default executor
 		server.start();
 	}
@@ -403,18 +403,8 @@ public class Server {
 			return response.toString();
 		}
 
-		String[] paramsString = t.getRequestURI().getQuery().split("&");  
-    Map<String, String> params = new HashMap<String, String>();  
-    for (String p : paramsString) {
-				int index = p.indexOf("=");
-				String key = p.substring(0, index);
-				String val = p.substring(index + 1);
-				try {
-					 val = URLDecoder.decode(val, charset);
-				} catch (IOException e) {}
-        params.put(key, val);  
-    }
-		for (String value: params.keySet()) {
+		Map<String, String> params = getParams(t.getRequestURI().getQuery());
+   		for (String value: params.keySet()) {
 			if (params.get(value).length() == 0) {
 				return "cannot have empty " + value;
 			}
@@ -438,6 +428,21 @@ public class Server {
 		}
 		System.out.println("Finished Creating problem");
 		return "Success!`";
+	}
+
+	private static Map<String, String> getParams(String query) {
+		String[] paramsString = query.split("&");  
+		Map<String, String> params = new HashMap<String, String>();  
+    for (String p : paramsString) {
+				int index = p.indexOf("=");
+				String key = p.substring(0, index);
+				String val = p.substring(index + 1);
+				try {
+					 val = URLDecoder.decode(val, charset);
+				} catch (IOException e) {}
+        params.put(key, val);  
+    }
+		return params;
 	}
 
 	static void createProblem(Map<String, String> params) throws IOException, DbxException {
@@ -547,9 +552,9 @@ public class Server {
 	}
 
 	private static String getProblemHeader(int problemNum) {
-		StringBuilder header = new StringBuilder();
-		header.append("<div><input type=\"button\" onclick=\"window.open(\\\"/input?" + problemNum +"\\\");\">Download Input</input><div>");
-		return header.toString();
+		String file = serveLocalFile("problem-header.html", false);
+		file = file.replaceAll("<problemnumber>", ""+problemNum);
+		return file;
 	}
 	
 	static class ViewOverviewHandler implements HttpHandler {
@@ -612,11 +617,37 @@ public class Server {
 		response.append("</pre></span>");
 		return response.toString();
 	}
+	
+	private static String serveLocalFile(String path, boolean keepWS) {
+		StringBuilder response = new StringBuilder();
+		BufferedReader br = null;
+		try {
+			br = new BufferedReader(new FileReader(new File(path)));
+			while (br.ready()) {
+				String line = br.readLine();
+				if (line == null) break;
+				if (!keepWS) line = line.trim();
+				response.append(line);
+				if (keepWS) response.append("\n");
+			}
+		} catch (Exception e) {
+			System.err.println("exception reading local file " + path);
+			e.printStackTrace();
+			response = new StringBuilder();
+			response.append("error reading file.");
+		} finally {
+			if (br != null) {
+				try { br.close();} catch (IOException e){}
+			}
+		}
+		return response.toString().trim();
+	}
 
 	private static String serveFile(String path, boolean keepWS) {
     StringBuilder response = new StringBuilder();
+		BufferedReader br = null;
     try {
-      BufferedReader br = readFileFromDbx(path);
+      br = readFileFromDbx(path);
       while (br.ready()) {
 				String line = br.readLine();
 				if (line == null) break;
@@ -629,7 +660,182 @@ public class Server {
 			e.printStackTrace();
       response = new StringBuilder();
       response.append("error reading file.");
-    }
+    } finally {
+			if (br != null) {
+				try {br.close();} catch (IOException e) {}
+			}
+		}
     return response.toString().trim();
+	}
+
+	private static String[] readRequestBody(InputStream req, boolean keepWS) {
+		BufferedReader br = null;
+		try {
+			ArrayList<String> files = new ArrayList<String>(2);
+			br = new BufferedReader(new InputStreamReader(req));
+			StringBuilder sb = null;
+			boolean inFile = false;
+			while (br.ready()) {
+				String line = br.readLine();
+				if (line == null) break;
+				if (!keepWS) line = line.trim();
+				boolean newInFile = !(line.startsWith("------WebKitFormBoundary")
+						|| line.startsWith("Content-Disposition:")
+						|| line.startsWith("Content-Type:"));
+				if (!inFile && newInFile) {
+					sb = new StringBuilder();
+				} else if (inFile && !newInFile) {
+					files.add(sb.toString().trim());
+				}
+				if (newInFile) {
+					sb.append(line);
+					if (keepWS) sb.append("\n");
+				}
+				inFile = newInFile;
+			}
+			String[] ret = new String[files.size()];
+			for (int i = 0; i < files.size(); i++) {
+				ret[i] = files.get(i);
+			}
+			return ret;
+		} catch (Exception e) {
+			System.err.println("error reading request body");
+			e.printStackTrace();
+			return null;
+		} finally {
+			if (br != null) {
+				try {br.close();} catch (IOException e) {}
+			}
+		}
+	}
+	
+	static class OutputHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+			// TODO handle big/small l8r
+ 			int responseCode = 200;
+			String response = null;
+			String query = t.getRequestURI().getQuery();
+
+			int outputNum = -1;
+			try {
+				outputNum = Integer.parseInt(query);
+			} catch (NumberFormatException e) {
+				response = query + " is not a valid problem number.";
+				responseCode = 404;
+			}
+			if (outputNum >= 0 && problemDirs.containsKey(outputNum)) {
+				System.out.println("handling output " + t.getRequestMethod() + "for problem number " + outputNum);
+				if ("GET".equals(t.getRequestMethod())) {
+					response = handleOutputGET(outputNum);
+				} else if ("POST".equals(t.getRequestMethod())) {
+					response = handleOutputPOST(outputNum, t);
+				} else {
+					response = "Invalid request method " + t.getRequestMethod();
+					responseCode = 404;
+				}
+			} else {
+				response = query + " is not a valid problem number.";
+        responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
+		}
+	}
+
+	private static String handleOutputGET(int problemNumber) {
+		String file = serveLocalFile("output-page.html", false);
+		file = file.replaceAll("<problemnumber>", ""+problemNumber);
+		System.out.println("returning output page:");
+		System.out.println(file);
+		return file;
+	}
+
+	private static String handleOutputPOST(int problemNumber, HttpExchange t) {
+		// TODO fix
+		String[] body = readRequestBody(t.getRequestBody(), true);
+		if (body != null) {
+			if (body.length < 2) {
+				System.err.println("incorrect submission...");
+				return "wat";
+			}
+			String programOutput = null;
+			System.out.println("text submission:");
+			System.out.println(body[0]);
+			System.out.println("file submission: ");
+			System.out.println(body[1]);
+			if (body[0].length() > 0 && body[1].length() > 0) {
+				System.err.println("both text and file specified.");
+				return "You cannot both upload a file and paste output!";
+			} else if (body[0].length() > 0) {
+				programOutput = body[0];
+			} else if (body[1].length() > 0) {
+				programOutput = body[1];
+			} else {
+				return "You didn't submit anything.";
+			}
+			String path = problemDirs.get(problemNumber) + "/output.txt";
+			return getFormattedOutput(serveFile(path, true), programOutput);
+		} else {
+			return "Error reading output.";
+		}
+	}	
+	
+	private static String getFormattedOutput(String expected, String given) {
+		System.out.println("given output: ");
+		System.out.println(given);
+		// TODO header or anything?
+		String[] expectedLines = expected.split("\n");
+		String[] givenLines = given.split("\n");
+		if (expectedLines.length != givenLines.length) {
+			return "<div style=\"background-color:red\"><p>Incorrect submission. Your output has " + givenLines.length + " lines, and the expected output has " + expectedLines.length + " lines.</p></div>";
+		}
+		boolean same = true;
+		boolean[] lineSame = new boolean[expectedLines.length];
+		for (int i = 0; i < expectedLines.length; i++) {
+			lineSame[i] = true;
+			String[] expectedLine = expectedLines[i].split("\\s+");
+			String[] givenLine = givenLines[i].split("\\s+");
+			if (givenLine.length != expectedLine.length) {
+				lineSame[i] = false;
+				same = false;
+			}
+			for (int j = 0; j < expectedLine.length; j++) {
+				if (!expectedLine[j].equals(givenLine[j])) {
+					same = false;
+					lineSame[i] = false;
+				}
+			}
+		}
+		if (same) {
+			return "<div style=\"background-color:green\"><p>Correct submission! Your output matched the expected output!</p></div>";
+			// TODO handleSolved();
+		} else {
+			StringBuilder response = new StringBuilder();
+			response.append("<h1>Incorrect response.</h1>");
+			response.append("<div>");
+			response.append("<div style=\"display:inline-block;border-style:solid;border-width:thin\">");	
+			response.append("<div><b>Expected:</b></div>");
+			for (int i = 0; i < expectedLines.length; i++) {
+				response.append("<div style=\"background-color:");
+				response.append(lineSame[i]?"green":"red");
+				response.append("\">");
+				response.append(expectedLines[i]);
+				response.append("</div>");
+			}
+			response.append("</div>");
+			response.append("<div style=\"display:inline-block;border-style:solid;border-width:thin\">");	
+			response.append("<div><b>Yours:</b></div>");
+			for (int i = 0; i < givenLines.length; i++) {
+				response.append("<div style=\"background-color:");
+				response.append(lineSame[i]?"green":"red");
+				response.append("\">");
+				response.append(givenLines[i]);
+				response.append("</div>");
+			}
+			response.append("</div></div>");
+			return response.toString();
+		}
 	}
 }
