@@ -36,6 +36,7 @@ public class Server {
 	private static Set<String> problemNames = new HashSet<String>();
 	private static int nextProblemNumber = 0;
 	private static int nextFolderNumber = 0;
+	private static String[] restrictedProblemNames = new String[]{"info", "info.txt", "overview", "overview.txt", "samplesols", "description", "description.txt", "editorial", "editorial.txt", "input", "input.txt", "output", "output.txt", "solved", "solved.txt"};
 	
 	private static Node root = null;
 	
@@ -54,7 +55,7 @@ public class Server {
 
 		// read state of application from dropbox
 		refreshImage();
-
+ 
 		// start server
 		HttpServer server = HttpServer.create(new InetSocketAddress(8000), 0);
 		server.createContext("/", new DefaultHandler());
@@ -65,6 +66,8 @@ public class Server {
 		server.createContext("/output", new OutputHandler());
 		server.createContext("/editorial", new EditorialHandler());
 		server.createContext("/samplesols", new SampleSolHandler());
+		server.createContext("/newoverview", new NewOverviewHandler());
+		server.createContext("/newsamplesol", new NewSampleSolHandler());
 		server.setExecutor(null); // creates a default executor
 		server.start();
 	}
@@ -202,12 +205,16 @@ public class Server {
 	}
 
 	private static boolean refreshImage() {
+		lock.writeLock().lock();
 		overviewDirs.clear();
 		problemDirs.clear();
 		problemNames.clear();
 		nextProblemNumber = 0;
 		nextFolderNumber = 0;
+		lock.writeLock().unlock();
+		lock.readLock().lock();
 		Node newRoot = computeNode("/");
+		lock.readLock().unlock();
 		if (newRoot == null) {
 			System.err.println("image load failed");
 			return false;
@@ -324,6 +331,7 @@ public class Server {
 	private static BufferedReader readFileFromDbx(String path) throws IOException, DbxException {
 		// read file from dropbox into byte output stream.
 		ByteArrayOutputStream out = null;
+		lock.readLock().lock();
 		try {
 			out = new ByteArrayOutputStream();
 			dbxClient.getFile(path, null, out);
@@ -334,6 +342,7 @@ public class Server {
 			System.err.println("Exception reading " + path + "from dropbox: " + e.toString());
 			throw e;
 		} finally {
+			lock.readLock().unlock();
 			if (out != null) {
 				out.close();
 			}	
@@ -344,6 +353,7 @@ public class Server {
 	private static void writeFileToDropbox(String fileData, String path) throws DbxException, IOException {
 		byte[] data = fileData.getBytes(charset);
 		InputStream in = null;
+		lock.writeLock().lock();
 		try {
 			in = new ByteArrayInputStream(data);
 			dbxClient.uploadFile(path, DbxWriteMode.add(), data.length, in);
@@ -353,6 +363,8 @@ public class Server {
 		} catch (IOException e) {
 			System.err.println("Exception writing " + path + " to dropbox: " + e.toString());
 			throw e;
+		} finally {
+			lock.writeLock().unlock();
 		}
 	}
 
@@ -406,7 +418,7 @@ public class Server {
 		}
 
 		Map<String, String> params = getParams(t.getRequestURI().getQuery());
-   		for (String value: params.keySet()) {
+   	for (String value: params.keySet()) {
 			if (params.get(value).length() == 0) {
 				return "cannot have empty " + value;
 			}
@@ -451,6 +463,11 @@ public class Server {
 		// make file text from post request
 		
 		String name = params.get("name");
+		for (String restricted: restrictedProblemNames) {
+			if (restricted.equals(name)) {
+				throw new IllegalArgumentException(name + " is not a valid problem name due to naming conventions in the server.");
+			}
+		}
 		if (problemNames.contains(name)) {
 			throw new IllegalArgumentException("problem named " + name + " already exists!");
 		}
@@ -500,7 +517,6 @@ public class Server {
 		writeFileToDropbox("", fullPath + "solved.txt");
 
 		// add it to the current image asynchronously
-		//refreshImage();
 		Thread t = new Thread(new RefreshWorker());
 		t.start();
 	}
@@ -753,8 +769,6 @@ public class Server {
 	private static String handleOutputGET(int problemNumber) {
 		String file = serveLocalFile("output-page.html", false);
 		file = file.replaceAll("<problemnumber>", ""+problemNumber);
-		System.out.println("returning output page:");
-		System.out.println(file);
 		return file;
 	}
 
@@ -908,6 +922,7 @@ public class Server {
 							page.append("<div style=\"background-color:grey;height:20px;\"></div>");
 						}
 						page.append("</div>");
+						page.append("<p>If you think your solution from this problem is novel and different, or just liked a certain way you did things, feel free to submit it <a href=\"/newsamplesol?" + outputNum + "\">here.</a></p>");
 						System.out.println("Served " + children.size() + " sample solutions for " + outputNum);
 						response = page.toString();
 					}
@@ -923,6 +938,148 @@ public class Server {
 			os.write(response.getBytes());
 			os.close();
 		}
+	}
+
+	static class NewOverviewHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+			int overviewNum = -1;
+ 			int responseCode = 200;
+			String response = null;
+			if ("GET".equals(t.getRequestMethod())) {
+				response = handleNewOverviewGET();
+			} else {
+				response = handleNewOverviewPOST(t);
+			}
+		
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
+		}
+	}
+	
+	private static String handleNewOverviewGET() {
+		return serveLocalFile("create-overview.html", false);
+	}
+	
+	private static String handleNewOverviewPOST(HttpExchange t) {
+		Map<String, String> params = getPostParams(t);
+		String path = params.get("path");
+		String overview = params.get("overview");
+		if (path != null && path.length() > 0 && overview != null && overview.length() > 0) {
+			if (!isValidDBPath(path)) {
+				return path + "is not an existing path";
+			}
+			String oldPath = path;
+			path += "/overview.txt";
+			if (isValidDBPath(path)) {
+				return oldPath + " already has an overview!";
+			}
+			try {
+				writeFileToDropbox(overview, path);
+				return "Success!";
+			} catch (IOException e) {
+				return "Error creating overview.";
+			} catch (DbxException e) {
+				return "Error creating overview.";
+			}
+		} else {
+			return "You did not fill out the overview fully!";
+		}
+	}
+	
+	static class NewSampleSolHandler implements HttpHandler {
+		public void handle(HttpExchange t) throws IOException {
+			String query = t.getRequestURI().getQuery();
+			int problemNum = -1;
+ 			int responseCode = 200;
+			String response = null;
+			try {
+				problemNum = Integer.parseInt(query);
+			} catch (NumberFormatException e) {
+				response = query + " is not a valid problem number.";
+				responseCode = 404;
+			}
+			if (problemNum >= 0 && problemDirs.containsKey(problemNum)) {
+				if ("GET".equals(t.getRequestMethod())) {
+					response = handleNewSampleSolGET(problemNum);
+				} else if ("POST".equals(t.getRequestMethod())) {
+					response = handleNewSampleSolPOST(problemNum, t);
+				} else {
+					response = t.getRequestMethod() + " is not a valid request type...";
+				}
+			} else {
+				response = query + " is not a valid problem number.";
+        responseCode = 404;
+			}
+			t.sendResponseHeaders(responseCode, response.getBytes().length);
+			OutputStream os = t.getResponseBody();
+			os.write(response.getBytes());
+			os.close();
+		}
+	}
+
+	private static String handleNewSampleSolGET(int problemNum) {
+		String file = serveLocalFile("add-sample-solution.html", false);
+		file = file.replaceAll("<problemnumber>", ""+problemNum);
+		return file;
+	}
+
+	private static String handleNewSampleSolPOST(int problemNum, HttpExchange t) {
+		Map<String, String> params = getPostParams(t);
+		try {
+			createSampleSol(problemNum, params);
+			return "Success!";
+		} catch (DbxException e) {
+			System.err.println(e);
+			return e.getMessage();
+		} catch (IOException e) {
+			System.err.println(e);
+			return e.getMessage();
+		} catch (IllegalArgumentException e) {
+			e.printStackTrace();
+			return e.getMessage();
+		} catch (Exception e) {
+			e.printStackTrace();
+			return e.getMessage();
+		}
+	}
+
+	private static String createSampleSol(int problemNum, Map<String, String> params) throws DbxException, IOException {
+		String path = problemDirs.get(problemNum) + "/samplesols";
+		String solution = params.get("sol");
+		if (solution == null || solution.length() == 0) {
+			throw new IllegalArgumentException("You need to provide some actual code!");
+		}
+		if (!isValidDBPath(path)) {
+			dbxClient.createFolder(path);
+		}
+		path += "/sol" + System.currentTimeMillis();
+		writeFileToDropbox(solution, path);
+
+		// Refresh image
+		Thread t = new Thread(new RefreshWorker());
+		t.start();
+
+		return "Successful!";	
+	}
+	
+	private static Map<String, String> getPostParams(HttpExchange t) {	
+		StringBuilder sb = new StringBuilder();
+		BufferedReader br = null;
+		try {
+			br = new BufferedReader(new InputStreamReader(t.getRequestBody()));
+			while (br.ready()) {
+				String line = br.readLine();
+				if (line == null) break;
+				sb.append(line.trim());
+			}
+		} catch (IOException e) {
+				sb = new StringBuilder();
+		} finally {
+			try { br.close(); } catch (IOException e) {}
+		}
+		return getParams(sb.toString());
 	}
 
 }
